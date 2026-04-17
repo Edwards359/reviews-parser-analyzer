@@ -31,7 +31,11 @@ class Review(Base):
     language: Mapped[str | None] = mapped_column(String(8), nullable=True)
     is_ai: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
     status: Mapped[ReviewStatus] = mapped_column(
-        Enum(ReviewStatus, name="review_status"),
+        Enum(
+            ReviewStatus,
+            name="review_status",
+            values_callable=lambda enum_cls: [m.value for m in enum_cls],
+        ),
         default=ReviewStatus.NEW,
         nullable=False,
     )

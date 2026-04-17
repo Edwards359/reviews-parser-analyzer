@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "0001_initial"
 down_revision: str | None = None
@@ -20,8 +21,11 @@ REVIEW_STATUS_VALUES = ("new", "processing", "awaiting_review", "processed", "fa
 
 
 def upgrade() -> None:
-    review_status = sa.Enum(*REVIEW_STATUS_VALUES, name="review_status")
+    review_status = postgresql.ENUM(
+        *REVIEW_STATUS_VALUES, name="review_status", create_type=False
+    )
     review_status.create(op.get_bind(), checkfirst=True)
+    review_status_col = review_status
 
     op.create_table(
         "reviews",
@@ -34,7 +38,7 @@ def upgrade() -> None:
         sa.Column("is_ai", sa.Boolean, nullable=False, server_default=sa.text("false")),
         sa.Column(
             "status",
-            review_status,
+            review_status_col,
             nullable=False,
             server_default="new",
         ),
@@ -56,4 +60,4 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_reviews_status_created", table_name="reviews")
     op.drop_table("reviews")
-    sa.Enum(name="review_status").drop(op.get_bind(), checkfirst=True)
+    postgresql.ENUM(name="review_status").drop(op.get_bind(), checkfirst=True)
