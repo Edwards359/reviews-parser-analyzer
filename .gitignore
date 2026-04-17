@@ -72,3 +72,7 @@ desktop.ini
 *.temp
 tmp/
 temp/
+
+# Scratch files used by shell-driven git operations
+_commit_msg.txt
+_bp.json
