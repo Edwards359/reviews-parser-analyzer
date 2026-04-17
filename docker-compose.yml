@@ -1,0 +1,65 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: reviews-db
+    restart: unless-stopped
+    env_file:
+      - app_test_2803-main/.env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: app_test_2803-main
+      dockerfile: Dockerfile
+    container_name: reviews-web
+    restart: unless-stopped
+    env_file:
+      - app_test_2803-main/.env
+    environment:
+      POSTGRES_HOST: db
+      WEBHOOK_TARGET_URL: http://worker:8100/webhook/review-created
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    profiles: ["worker"]
+    build:
+      context: worker_ai-main
+      dockerfile: Dockerfile
+    container_name: reviews-worker
+    restart: unless-stopped
+    env_file:
+      - worker_ai-main/.env
+    environment:
+      TARGET_SITE_URL: http://web:8000
+    depends_on:
+      web:
+        condition: service_healthy
+    volumes:
+      - ./worker_ai-main/data:/service/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8100/healthz || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
