@@ -54,10 +54,6 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m ruff check app_test_2803-main worker_ai-main tests
 ```
 
-## Ответ на ДЗ
-
-Готовый текст и PDF лежат в папке `.homework/` (папка исключена из git).
-
 ## Структура
 
 ```text
