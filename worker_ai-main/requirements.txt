@@ -6,3 +6,4 @@ httpx==0.28.1
 tenacity==9.0.0
 fastapi==0.115.12
 uvicorn[standard]==0.34.0
+prometheus-client==0.21.1

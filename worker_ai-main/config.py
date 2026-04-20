@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     worker_api_token: str = "change-me"
     worker_poll_interval: int = 10
     state_file_path: str = "data/state.json"
+    state_max_entries: int = 10000
+    state_max_age_days: int = 30
     ai_author_name: str = "AI Support"
 
     llm_provider: LLMProviderName = "openai"

@@ -5,6 +5,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ReviewCreate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "parent_id": None,
+                    "name": "Иван",
+                    "text": "Всё супер, быстрая доставка, спасибо!",
+                }
+            ]
+        }
+    )
+
     parent_id: int | None = None
     name: str | None = Field(default=None, max_length=255)
     text: str = Field(min_length=1, max_length=5000)
@@ -27,6 +39,18 @@ class ReviewCreate(BaseModel):
 
 
 class AIReplyCreate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "parent_id": 42,
+                    "name": "AI Support",
+                    "text": "Благодарим за отзыв! Рады, что вам всё понравилось.",
+                }
+            ]
+        }
+    )
+
     parent_id: int = Field(gt=0)
     name: str | None = Field(default=None, max_length=255)
     text: str = Field(min_length=1, max_length=5000)
@@ -52,6 +76,8 @@ class ReviewRead(BaseModel):
     tone: str | None
     language: str | None = None
     is_ai: bool = False
+    retry_count: int = 0
+    last_error: str | None = None
     created_at: datetime
 
 
@@ -59,6 +85,7 @@ class ReviewUpdate(BaseModel):
     status: ReviewStatus | None = None
     response: str | None = None
     tone: ReviewTone | None = None
+    last_error: str | None = None
 
 
 class ReviewListResponse(BaseModel):

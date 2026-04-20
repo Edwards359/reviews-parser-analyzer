@@ -53,6 +53,8 @@ services:
     depends_on:
       web:
         condition: service_healthy
+    ports:
+      - "${WORKER_METRICS_PORT:-8100}:8100"
     volumes:
       - ./worker_ai-main/data:/service/data
     healthcheck:
@@ -61,5 +63,19 @@ services:
       timeout: 5s
       retries: 5
 
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v2.54.1
+    container_name: reviews-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - web
+
 volumes:
   postgres_data:
+  prometheus_data:

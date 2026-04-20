@@ -4,6 +4,7 @@ import logging
 
 import httpx
 from config import get_settings
+from logging_setup import CORRELATION_HEADER, correlation_id_ctx
 from models import AIReplyPayload, RemoteReview, ReviewStatus, ReviewUpdatePayload
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -24,6 +25,10 @@ class ReviewSiteClient:
         headers = dict(kwargs.pop("headers", {}) or {})
         if auth:
             headers.update(self._worker_headers)
+
+        cid = correlation_id_ctx.get()
+        if cid and cid != "-" and CORRELATION_HEADER not in headers:
+            headers[CORRELATION_HEADER] = cid
 
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(4),
@@ -91,4 +96,25 @@ class ReviewSiteClient:
             json=payload.model_dump(mode="json", exclude_none=True),
         )
         logger.info("Review id=%s updated", review_id)
+        return RemoteReview.model_validate(response.json())
+
+    async def retry_review(self, review_id: int) -> RemoteReview | None:
+        """POST /api/v1/reviews/{id}/retry. 409 -> None (лимит или нельзя)."""
+        try:
+            response = await self._request(
+                "POST",
+                f"/api/v1/reviews/{review_id}/retry",
+                auth=True,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 409):
+                logger.info(
+                    "retry_review id=%s rejected (%s): %s",
+                    review_id,
+                    exc.response.status_code,
+                    exc.response.text,
+                )
+                return None
+            raise
+        logger.info("Review id=%s scheduled for retry", review_id)
         return RemoteReview.model_validate(response.json())

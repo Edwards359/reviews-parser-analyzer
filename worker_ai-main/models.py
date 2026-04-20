@@ -43,6 +43,7 @@ class ReviewUpdatePayload(BaseModel):
     status: ReviewStatus | None = None
     response: str | None = None
     tone: ReviewTone | None = None
+    last_error: str | None = None
 
 
 class AnalysisResult(BaseModel):

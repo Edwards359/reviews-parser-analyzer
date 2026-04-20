@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     webhook_target_url: str = ""
     webhook_timeout_seconds: float = 5.0
     public_rate_limit_per_minute: int = 30
+    max_retry_count: int = 5
     environment: str = "local"
 
     model_config = SettingsConfigDict(

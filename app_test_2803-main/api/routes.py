@@ -17,15 +17,23 @@ from app.schemas import (
     ReviewRead,
     ReviewUpdate,
 )
+from app.services.metrics import (
+    render_metrics,
+    reviews_claimed_total,
+    reviews_created_total,
+    reviews_retry_total,
+    reviews_status_gauge,
+)
 from app.services.ratelimit import SlidingWindowRateLimiter
 from app.services.reviews import (
     claim_new_reviews,
     compute_text_hash,
     find_recent_duplicate,
     notify_webhook,
+    reset_review_for_retry,
 )
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,17 +72,17 @@ def _enforce_rate_limit(request: Request) -> None:
         )
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse("index.html", {"request": request})
 
 
-@router.get("/healthz")
+@router.get("/healthz", tags=["health"], summary="Liveness-probe")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/readyz")
+@router.get("/readyz", tags=["health"], summary="Readiness-probe (БД)")
 async def readyz() -> dict[str, str]:
     try:
         engine = get_engine()
@@ -88,11 +96,33 @@ async def readyz() -> dict[str, str]:
     return {"status": "ready"}
 
 
+@router.get("/metrics", include_in_schema=False)
+async def metrics(session: AsyncSession = Depends(get_db_session)) -> Response:
+    """Prometheus-эндпоинт. Перед выгрузкой обновляет gauge по статусам отзывов."""
+    try:
+        result = await session.execute(
+            select(Review.status, func.count(Review.id)).group_by(Review.status)
+        )
+        counts = {row[0].value if hasattr(row[0], "value") else str(row[0]): int(row[1]) for row in result}
+        for st in ReviewStatus:
+            reviews_status_gauge.labels(status=st.value).set(counts.get(st.value, 0))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to refresh status gauge: %s", exc)
+
+    payload, content_type = render_metrics()
+    return Response(content=payload, media_type=content_type)
+
+
 # --------- v1 API ---------
 api_v1 = APIRouter(prefix="/api/v1")
 
 
-@api_v1.get("/reviews", response_model=ReviewListResponse)
+@api_v1.get(
+    "/reviews",
+    response_model=ReviewListResponse,
+    tags=["public"],
+    summary="Список отзывов с фильтрами и пагинацией",
+)
 async def list_reviews_v1(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -126,7 +156,13 @@ async def list_reviews_v1(
     )
 
 
-@api_v1.post("/reviews", response_model=ReviewRead, status_code=status.HTTP_201_CREATED)
+@api_v1.post(
+    "/reviews",
+    response_model=ReviewRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["public"],
+    summary="Создание отзыва (с rate-limit и дедупликацией по тексту)",
+)
 async def create_review_v1(
     payload: ReviewCreate,
     request: Request,
@@ -157,6 +193,7 @@ async def create_review_v1(
     await session.commit()
     await session.refresh(review)
 
+    reviews_created_total.labels(source="public").inc()
     asyncio.create_task(notify_webhook(settings, review))
     return review
 
@@ -166,6 +203,8 @@ async def create_review_v1(
     response_model=ReviewRead,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_worker_token)],
+    tags=["worker"],
+    summary="Публикация ответа от AI (is_ai=true ставит сервер)",
 )
 async def create_ai_reply_v1(
     payload: AIReplyCreate,
@@ -189,6 +228,7 @@ async def create_ai_reply_v1(
     session.add(review)
     await session.commit()
     await session.refresh(review)
+    reviews_created_total.labels(source="ai").inc()
     return review
 
 
@@ -196,12 +236,20 @@ async def create_ai_reply_v1(
     "/reviews/claim",
     response_model=ClaimResponse,
     dependencies=[Depends(require_worker_token)],
+    tags=["worker"],
+    summary="Атомарный claim (FOR UPDATE SKIP LOCKED)",
+    description=(
+        "Возвращает до `limit` отзывов со статусом `new`, переводя их в `processing`. "
+        "Несколько воркеров могут вызывать параллельно — пачки не пересекаются."
+    ),
 )
 async def claim_reviews_v1(
     limit: int = Query(10, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
 ) -> ClaimResponse:
     claimed = await claim_new_reviews(session, limit=limit)
+    if claimed:
+        reviews_claimed_total.inc(len(claimed))
     return ClaimResponse(items=[ReviewRead.model_validate(item) for item in claimed])
 
 
@@ -209,6 +257,8 @@ async def claim_reviews_v1(
     "/reviews/{review_id}",
     response_model=ReviewRead,
     dependencies=[Depends(require_worker_token)],
+    tags=["worker"],
+    summary="Обновление отзыва воркером (status/tone/response/last_error)",
 )
 async def update_review_v1(
     review_id: int,
@@ -227,13 +277,51 @@ async def update_review_v1(
         review.response = payload.response
     if payload.tone is not None:
         review.tone = payload.tone.value
+    if payload.last_error is not None:
+        review.last_error = payload.last_error
 
     await session.commit()
     await session.refresh(review)
     return review
 
 
-@api_v1.get("/reviews.csv")
+@api_v1.post(
+    "/reviews/{review_id}/retry",
+    response_model=ReviewRead,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_worker_token)],
+    tags=["worker"],
+    summary="Повторная постановка failed-отзыва в очередь",
+    description=(
+        "Возвращает отзыв из `failed`/`processing` обратно в статус `new` "
+        "и увеличивает `retry_count`. После достижения лимита отвечает 409. "
+        "На `processed`/`new` отвечает 409. На AI-ответах — 409."
+    ),
+)
+async def retry_review_v1(
+    review_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> Review:
+    try:
+        review = await reset_review_for_retry(
+            session, review_id, max_retries=settings.max_retry_count
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if review is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review not found.")
+    reviews_retry_total.inc()
+    asyncio.create_task(notify_webhook(settings, review))
+    return review
+
+
+@api_v1.get(
+    "/reviews.csv",
+    tags=["public"],
+    summary="Экспорт всех отзывов в CSV",
+    response_class=StreamingResponse,
+)
 async def export_reviews_csv_v1(
     session: AsyncSession = Depends(get_db_session),
 ) -> StreamingResponse:
@@ -271,7 +359,7 @@ async def export_reviews_csv_v1(
 # --------- Legacy aliases (обратная совместимость) ---------
 
 
-@router.get("/api/reviews", response_model=list[ReviewRead])
+@router.get("/api/reviews", response_model=list[ReviewRead], tags=["legacy"])
 async def list_reviews_legacy(
     session: AsyncSession = Depends(get_db_session),
 ) -> list[Review]:
@@ -281,7 +369,12 @@ async def list_reviews_legacy(
     return list(result.scalars().all())
 
 
-@router.post("/api/reviews", response_model=ReviewRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/api/reviews",
+    response_model=ReviewRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["legacy"],
+)
 async def create_review_legacy(
     payload: ReviewCreate,
     request: Request,
@@ -291,7 +384,7 @@ async def create_review_legacy(
     return await create_review_v1(payload=payload, request=request, session=session, settings=settings)
 
 
-@router.patch("/api/reviews/{review_id}", response_model=ReviewRead)
+@router.patch("/api/reviews/{review_id}", response_model=ReviewRead, tags=["legacy"])
 async def update_review_legacy(
     review_id: int,
     payload: ReviewUpdate,

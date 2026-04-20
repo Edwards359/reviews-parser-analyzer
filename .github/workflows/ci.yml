@@ -55,7 +55,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r app_test_2803-main/requirements.txt
           python -m pip install -r worker_ai-main/requirements.txt
-          python -m pip install pytest pytest-asyncio
+          python -m pip install pytest pytest-asyncio aiosqlite testcontainers
 
       - name: Run pytest
         run: pytest tests/ -q

@@ -7,10 +7,13 @@ from datetime import UTC, datetime
 import httpx
 from app.config import Settings
 from app.models.review import Review, ReviewStatus
+from app.services.logging_setup import correlation_id_ctx
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+CORRELATION_HEADER = "X-Request-ID"
 
 
 def compute_text_hash(text: str) -> str:
@@ -69,6 +72,40 @@ async def claim_new_reviews(session: AsyncSession, limit: int = 10) -> list[Revi
     return claimed
 
 
+async def reset_review_for_retry(
+    session: AsyncSession,
+    review_id: int,
+    max_retries: int = 5,
+) -> Review | None:
+    """Переводит отзыв из `failed`/`processing` обратно в `new` для повторной обработки.
+
+    - `None` если отзыва не существует.
+    - Бросает ValueError, если исчерпан лимит retry.
+    - Бросает ValueError, если отзыв нельзя перезапустить (уже processed / is_ai).
+    """
+    review = await session.get(Review, review_id)
+    if review is None:
+        return None
+
+    if review.is_ai:
+        raise ValueError("AI-ответы не перезапускаются")
+
+    if review.status in (ReviewStatus.NEW, ReviewStatus.PROCESSED):
+        raise ValueError(f"Нельзя перезапустить отзыв в статусе {review.status.value!r}")
+
+    if review.retry_count >= max_retries:
+        raise ValueError(
+            f"Превышен лимит retry ({review.retry_count}/{max_retries}) для отзыва {review_id}"
+        )
+
+    review.status = ReviewStatus.NEW
+    review.retry_count = (review.retry_count or 0) + 1
+    review.claimed_at = None
+    await session.commit()
+    await session.refresh(review)
+    return review
+
+
 async def notify_webhook(settings: Settings, review: Review) -> None:
     if not settings.webhook_target_url:
         return
@@ -79,8 +116,12 @@ async def notify_webhook(settings: Settings, review: Review) -> None:
         "name": review.name,
         "text": review.text,
     }
+    headers: dict[str, str] = {}
+    cid = correlation_id_ctx.get()
+    if cid and cid != "-":
+        headers[CORRELATION_HEADER] = cid
     try:
         async with httpx.AsyncClient(timeout=settings.webhook_timeout_seconds) as client:
-            await client.post(settings.webhook_target_url, json=payload)
+            await client.post(settings.webhook_target_url, json=payload, headers=headers)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Webhook delivery failed: %s", exc)

@@ -7,7 +7,11 @@ from app.api.routes import router
 from app.config import get_settings
 from app.db.session import get_engine
 from app.models import Review  # noqa: F401
-from app.services.logging_setup import CorrelationIdMiddleware, setup_logging
+from app.services.logging_setup import (
+    CorrelationIdMiddleware,
+    PrometheusMetricsMiddleware,
+    setup_logging,
+)
 from fastapi import FastAPI
 
 setup_logging()
@@ -36,6 +40,22 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="Reviews App", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Reviews App",
+    version="1.1.0",
+    lifespan=lifespan,
+    description=(
+        "Хранилище клиентских отзывов + интеграция с LLM-воркером. "
+        "Публичный API (`/api/reviews`, `/api/v1/reviews`) и служебный API "
+        "воркера (`/api/v1/reviews/claim`, `/ai-reply`, `/retry`, `/{id}`)."
+    ),
+    openapi_tags=[
+        {"name": "public", "description": "Публичные ручки: создание и чтение отзывов."},
+        {"name": "worker", "description": "Служебные ручки воркера (X-Worker-Token)."},
+        {"name": "health", "description": "Health/readiness/metrics."},
+        {"name": "legacy", "description": "Старые алиасы для обратной совместимости."},
+    ],
+)
 app.add_middleware(CorrelationIdMiddleware)
+app.add_middleware(PrometheusMetricsMiddleware)
 app.include_router(router)

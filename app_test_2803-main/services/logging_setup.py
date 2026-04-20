@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 import uuid
 from contextvars import ContextVar
 
+from app.services.metrics import http_request_duration_seconds, http_requests_total
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -45,4 +47,31 @@ class CorrelationIdMiddleware(BaseHTTPMiddleware):
         finally:
             correlation_id_ctx.reset(token)
         response.headers[self.header_name] = cid
+        return response
+
+
+class PrometheusMetricsMiddleware(BaseHTTPMiddleware):
+    """Считает HTTP-запросы и латентность. `path` берём из route-шаблона
+    (например, `/api/v1/reviews/{review_id}`), чтобы не плодить лейблы.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.perf_counter()
+        response: Response
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+        except Exception:
+            status_code = 500
+            raise
+        finally:
+            route = request.scope.get("route")
+            path = getattr(route, "path", None) or "__unmatched__"
+            elapsed = time.perf_counter() - start
+            http_requests_total.labels(
+                method=request.method, path=path, status=str(status_code)
+            ).inc()
+            http_request_duration_seconds.labels(
+                method=request.method, path=path
+            ).observe(elapsed)
         return response

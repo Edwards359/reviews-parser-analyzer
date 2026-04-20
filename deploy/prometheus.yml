@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: reviews-web
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["web:8000"]
+        labels:
+          service: reviews-web
+
+  - job_name: reviews-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["worker:8100"]
+        labels:
+          service: reviews-worker
